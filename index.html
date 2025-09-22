@@ -238,7 +238,7 @@
         </div>
         <div class="stat-card">
           <div class="stat-value" id="autoSyncCount">0</div>
-          <div class="stat-label">AUTO SYNCS</div>
+          <div class="stat-label">OPTIMIZATIONS</div>
         </div>
       </div>
       
@@ -283,13 +283,16 @@
 
   <script>
     let coordinates = [];
+    let allCoordinates = []; // Main array storing all coordinates
     let watchId = null;
     let startTime = null;
     let timerInterval = null;
     let autoSyncCount = 0;
+    let optimizationCount = 0; // Track number of optimizations
     let lastSuccessfulSync = null;
     let signalLostTimeout = null;
     let isRecording = false;
+    let lastOptimizationTime = null;
 
     // DOM Elements
     const startBtn = document.getElementById('startBtn');
@@ -310,6 +313,447 @@
       backup: 'https://your-backup-api.com/api/routes',
       emergency: 'https://emergency-backup.com/api/save'
     };
+
+    // Douglas-Peucker Algorithm for Route Optimization
+    function douglasPeucker(points, epsilon = 0.00001) {
+      if (points.length <= 2) return points;
+      
+      // Find the point with maximum distance from line between first and last
+      let maxDistance = 0;
+      let maxIndex = 0;
+      const start = points[0];
+      const end = points[points.length - 1];
+      
+      for (let i = 1; i < points.length - 1; i++) {
+        const distance = perpendicularDistance(points[i], start, end);
+        if (distance > maxDistance) {
+          maxDistance = distance;
+          maxIndex = i;
+        }
+      }
+      
+      // If max distance is greater than epsilon, recursively simplify
+      if (maxDistance > epsilon) {
+        const leftPart = douglasPeucker(points.slice(0, maxIndex + 1), epsilon);
+        const rightPart = douglasPeucker(points.slice(maxIndex), epsilon);
+        
+        // Combine results (remove duplicate point at junction)
+        return leftPart.slice(0, -1).concat(rightPart);
+      } else {
+        // All points between start and end can be removed
+        return [start, end];
+      }
+    }
+
+    // Calculate perpendicular distance from point to line
+    function perpendicularDistance(point, lineStart, lineEnd) {
+      const x0 = point.lat;
+      const y0 = point.lng;
+      const x1 = lineStart.lat;
+      const y1 = lineStart.lng;
+      const x2 = lineEnd.lat;
+      const y2 = lineEnd.lng;
+      
+      const A = x2 - x1;
+      const B = y2 - y1;
+      const C = x1 - x0;
+      const D = y1 - y0;
+      
+      const dot = A * C + B * D;
+      const lenSq = A * A + B * B;
+      
+      if (lenSq === 0) {
+        // Line start and end are the same point
+        return Math.sqrt(C * C + D * D);
+      }
+      
+      const param = dot / lenSq;
+      let closestX, closestY;
+      
+      if (param < 0) {
+        closestX = x1;
+        closestY = y1;
+      } else if (param > 1) {
+        closestX = x2;
+        closestY = y2;
+      } else {
+        closestX = x1 + param * A;
+        closestY = y1 + param * B;
+      }
+      
+      const dx = x0 - closestX;
+      const dy = y0 - closestY;
+      
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // Route Optimization Function (Every 2 Minutes for All Coordinates)
+    function optimizeRoute() {
+      if (allCoordinates.length < 3) return;
+      
+      const originalCount = allCoordinates.length;
+      console.log(`🔧 Starting route optimization for all coordinates. Original points: ${originalCount}`);
+      
+      // Always count optimization attempts for user feedback
+      optimizationCount++;
+      autoSyncCount = optimizationCount;
+      autoSyncCountDisplay.textContent = optimizationCount;
+      
+      // Analyze route characteristics
+      const routeAnalysis = analyzeRoute(allCoordinates);
+      
+      // Primary optimization: Target straight line segments while preserving curves
+      let optimized = optimizeStraightLines(allCoordinates);
+      let reductionPercentage = ((originalCount - optimized.length) / originalCount) * 100;
+      
+      console.log(`📊 Optimization result: ${originalCount} → ${optimized.length} points (${reductionPercentage.toFixed(1)}% reduction)`);
+      
+      // Apply optimization to all coordinates regardless of dataset size
+      allCoordinates = optimized;
+      coordinates = optimized.slice(-5); // Keep last 5 for preview
+      
+      // Save to local storage for safety
+      saveToLocalStorage();
+      
+      // Update display
+      updateCoordinatesDisplay();
+      
+      // Show optimization status
+      showOptimizationStatus(originalCount, optimized.length, reductionPercentage, 'applied');
+    }
+
+    // Calculate adaptive epsilon based on route characteristics
+    function calculateAdaptiveEpsilon(points) {
+      if (points.length < 2) return 0.0001;
+      
+      // Calculate average distance between consecutive points
+      let totalDistance = 0;
+      for (let i = 1; i < points.length; i++) {
+        const dist = getDistance(points[i-1], points[i]);
+        totalDistance += dist;
+      }
+      const avgDistance = totalDistance / (points.length - 1);
+      
+      // Calculate route span (bounding box)
+      const lats = points.map(p => p.lat);
+      const lngs = points.map(p => p.lng);
+      const latSpan = Math.max(...lats) - Math.min(...lats);
+      const lngSpan = Math.max(...lngs) - Math.min(...lngs);
+      const routeSpan = Math.max(latSpan, lngSpan);
+      
+      // Adaptive epsilon: larger for longer routes, smaller for precise tracking
+      let epsilon = Math.max(routeSpan * 0.001, avgDistance * 0.5);
+      
+      // Minimum threshold (about 5 meters)
+      epsilon = Math.max(epsilon, 0.00005);
+      
+      // Maximum threshold (about 50 meters)
+      epsilon = Math.min(epsilon, 0.0005);
+      
+      console.log(`📐 Route analysis: ${points.length} points, avg distance: ${(avgDistance * 111000).toFixed(1)}m, span: ${(routeSpan * 111000).toFixed(1)}m`);
+      
+      return epsilon;
+    }
+
+    // Get distance between two points in degrees
+    function getDistance(point1, point2) {
+      const dx = point2.lat - point1.lat;
+      const dy = point2.lng - point1.lng;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // Detect straight line segments for targeted optimization
+    function detectStraightLineSegments(points, threshold = 0.00002) {
+      if (points.length < 3) return [];
+      
+      const segments = [];
+      let currentSegment = [0]; // Start with first point index
+      
+      for (let i = 1; i < points.length - 1; i++) {
+        const prev = points[i - 1];
+        const current = points[i];
+        const next = points[i + 1];
+        
+        // Calculate deviation from straight line
+        const deviation = perpendicularDistance(current, prev, next);
+        
+        if (deviation < threshold) {
+          // Point is on straight line
+          currentSegment.push(i);
+        } else {
+          // Curve detected - end current segment if it has enough points
+          if (currentSegment.length >= 3) {
+            currentSegment.push(i); // Include the curve point as end
+            segments.push([...currentSegment]);
+          }
+          currentSegment = [i]; // Start new segment
+        }
+      }
+      
+      // Handle last segment
+      currentSegment.push(points.length - 1);
+      if (currentSegment.length >= 3) {
+        segments.push(currentSegment);
+      }
+      
+      console.log(`🛣️ Detected ${segments.length} straight line segments with ${segments.reduce((sum, seg) => sum + seg.length - 2, 0)} reducible points`);
+      return segments;
+    }
+
+    // Optimize only straight line segments, preserve curves
+    function optimizeStraightLines(points) {
+      if (points.length < 3) return points;
+      
+      const straightSegments = detectStraightLineSegments(points);
+      
+      if (straightSegments.length === 0) {
+        console.log(`🌀 No straight line segments found - preserving all ${points.length} points for route shape`);
+        return points;
+      }
+      
+      const result = [];
+      let lastProcessedIndex = -1;
+      
+      for (const segment of straightSegments) {
+        // Add points between segments (curves/turns)
+        for (let i = lastProcessedIndex + 1; i < segment[0]; i++) {
+          result.push(points[i]);
+        }
+        
+        // Optimize this straight segment
+        const segmentPoints = segment.map(index => points[index]);
+        const optimizedSegment = douglasPeucker(segmentPoints, 0.00003); // Aggressive for straight lines
+        
+        // Add optimized segment (avoid duplicating junction points)
+        if (result.length === 0 || result[result.length - 1] !== optimizedSegment[0]) {
+          result.push(...optimizedSegment);
+        } else {
+          result.push(...optimizedSegment.slice(1));
+        }
+        
+        lastProcessedIndex = segment[segment.length - 1];
+      }
+      
+      // Add remaining points after last segment
+      for (let i = lastProcessedIndex + 1; i < points.length; i++) {
+        result.push(points[i]);
+      }
+      
+      const reduction = ((points.length - result.length) / points.length) * 100;
+      console.log(`🎯 Straight-line optimization: ${points.length} → ${result.length} points (${reduction.toFixed(1)}% reduction)`);
+      
+      return result;
+    }
+
+    // Remove redundant points on straight lines (legacy function - kept for compatibility)
+    function removeRedundantPoints(points) {
+      if (points.length <= 2) return points;
+      
+      const result = [points[0]]; // Always keep first point
+      
+      for (let i = 1; i < points.length - 1; i++) {
+        const prev = points[i - 1];
+        const current = points[i];
+        const next = points[i + 1];
+        
+        // Calculate if current point is on straight line between prev and next
+        const straightLineDistance = perpendicularDistance(current, prev, next);
+        
+        // Keep point if it's not on a straight line (threshold: ~2 meters)
+        if (straightLineDistance > 0.00002) {
+          result.push(current);
+        }
+      }
+      
+      result.push(points[points.length - 1]); // Always keep last point
+      return result;
+    }
+
+    // Save coordinates to local storage
+    function saveToLocalStorage() {
+      try {
+        const data = {
+          allCoordinates: allCoordinates,
+          timestamp: new Date().toISOString(),
+          optimizationCount: optimizationCount
+        };
+        localStorage.setItem('locationTracker_coordinates', JSON.stringify(data));
+        console.log(`💾 Saved ${allCoordinates.length} coordinates to local storage`);
+      } catch (error) {
+        console.error('Failed to save to local storage:', error);
+      }
+    }
+
+    // Load coordinates from local storage
+    function loadFromLocalStorage() {
+      try {
+        const stored = localStorage.getItem('locationTracker_coordinates');
+        if (stored) {
+          const data = JSON.parse(stored);
+          allCoordinates = data.allCoordinates || [];
+          optimizationCount = data.optimizationCount || 0;
+          autoSyncCount = optimizationCount;
+          autoSyncCountDisplay.textContent = optimizationCount;
+          coordinates = allCoordinates.slice(-5);
+          updateCoordinatesDisplay();
+          console.log(`📱 Loaded ${allCoordinates.length} coordinates from local storage`);
+        }
+      } catch (error) {
+        console.error('Failed to load from local storage:', error);
+      }
+    }
+
+    // Show optimization status
+    function showOptimizationStatus(original, optimized, percentage, status = 'applied') {
+      autoSyncStatus.style.display = 'block';
+      
+      let statusColor = '#007bff';
+      let statusIcon = '📊';
+      let message = '';
+      
+      if (status === 'skipped') {
+        statusColor = '#6c757d';
+        statusIcon = '🌀';
+        message = `Shape preserved: ${original} points kept (curves/turns detected)`;
+      } else {
+        // Applied optimization
+        if (percentage >= 50) {
+          statusColor = '#28a745';
+          statusIcon = '🚀';
+        } else if (percentage >= 20) {
+          statusColor = '#ffc107';
+          statusIcon = '⚡';
+        } else if (percentage >= 5) {
+          statusColor = '#007bff';
+          statusIcon = '🎯';
+        } else {
+          statusColor = '#dc3545';
+          statusIcon = '⚠️';
+        }
+        message = `Route optimized: ${original} → ${optimized} points (${percentage.toFixed(1)}% reduction)`;
+      }
+      
+      autoSyncStatus.innerHTML = `
+        <div class="sync-indicator">
+          <div class="loading-spinner"></div>
+          <span style="color: ${statusColor};">${statusIcon} ${message}</span>
+        </div>
+      `;
+      
+      setTimeout(() => {
+        autoSyncStatus.style.display = 'none';
+      }, 4000);
+    }
+
+    // Enhanced curve detection and analysis
+    function detectCurvesAndTurns(points, angleThreshold = 0.3) {
+      if (points.length < 3) return { curves: [], criticalPoints: [] };
+      
+      const curves = [];
+      const criticalPoints = [];
+      
+      for (let i = 1; i < points.length - 1; i++) {
+        const prev = points[i - 1];
+        const current = points[i];
+        const next = points[i + 1];
+        
+        // Calculate turn angle
+        const angle = calculateTurnAngle(prev, current, next);
+        
+        // Detect significant turns/curves
+        if (Math.abs(angle) > angleThreshold) {
+          curves.push(i);
+          criticalPoints.push({
+            index: i,
+            angle: angle,
+            type: angle > angleThreshold ? 'left_turn' : 'right_turn',
+            severity: Math.abs(angle)
+          });
+        }
+        
+        // Detect direction changes (important for route shape)
+        if (i > 1) {
+          const prevAngle = calculateTurnAngle(points[i - 2], points[i - 1], points[i]);
+          const currentAngle = angle;
+          
+          // If direction change is significant, mark as critical
+          if (Math.abs(prevAngle - currentAngle) > 0.5) {
+            if (!criticalPoints.find(cp => cp.index === i)) {
+              criticalPoints.push({
+                index: i,
+                angle: currentAngle,
+                type: 'direction_change',
+                severity: Math.abs(prevAngle - currentAngle)
+              });
+            }
+          }
+        }
+      }
+      
+      console.log(`🌀 Curve analysis: ${curves.length} turns detected, ${criticalPoints.length} critical points for route shape`);
+      
+      return { curves, criticalPoints };
+    }
+
+    // Calculate turn angle between three points
+    function calculateTurnAngle(p1, p2, p3) {
+      const v1 = { x: p2.lat - p1.lat, y: p2.lng - p1.lng };
+      const v2 = { x: p3.lat - p2.lat, y: p3.lng - p2.lng };
+      
+      const dot = v1.x * v2.x + v1.y * v2.y;
+      const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
+      const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
+      
+      if (mag1 === 0 || mag2 === 0) return 0;
+      
+      return Math.acos(Math.max(-1, Math.min(1, dot / (mag1 * mag2))));
+    }
+
+    // Analyze route characteristics for debugging
+    function analyzeRoute(points) {
+      if (points.length < 2) return;
+      
+      let totalDistance = 0;
+      let straightSegments = 0;
+      
+      // Use enhanced curve detection
+      const curveAnalysis = detectCurvesAndTurns(points);
+      const turns = curveAnalysis.curves.length;
+      
+      for (let i = 1; i < points.length; i++) {
+        const dist = getDistance(points[i-1], points[i]);
+        totalDistance += dist;
+        
+        // Count straight segments (points not in curves)
+        if (!curveAnalysis.curves.includes(i)) {
+          straightSegments++;
+        }
+      }
+      
+      console.log(`🗺️ Enhanced route analysis: ${points.length} points, ${(totalDistance * 111000).toFixed(0)}m total, ${straightSegments} straight segments, ${turns} turns/curves`);
+      
+      return {
+        totalDistance,
+        straightSegments,
+        turns,
+        criticalPoints: curveAnalysis.criticalPoints,
+        avgSegmentLength: totalDistance / (points.length - 1)
+      };
+    }
+
+    // Calculate turn angle between three points (legacy function kept for compatibility)
+    function calculateTurnAngleLegacy(p1, p2, p3) {
+      const v1 = { x: p2.lat - p1.lat, y: p2.lng - p1.lng };
+      const v2 = { x: p3.lat - p2.lat, y: p3.lng - p2.lng };
+      
+      const dot = v1.x * v2.x + v1.y * v2.y;
+      const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
+      const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
+      
+      if (mag1 === 0 || mag2 === 0) return 0;
+      
+      return Math.acos(Math.max(-1, Math.min(1, dot / (mag1 * mag2))));
+    }
 
     // Timer Functions
     function startTimer() {
@@ -353,39 +797,101 @@
     function handleSignalLost() {
       signalDot.className = 'signal-dot signal-lost';
       signalText.textContent = 'GPS Signal: Lost';
-      signalDetails.textContent = 'Connection lost - attempting auto-sync...';
+      signalDetails.textContent = 'Connection lost - optimizing route and saving locally...';
       
-      // Trigger auto-sync when signal is lost
-      if (coordinates.length > 0) {
-        autoSyncData('Signal lost - emergency sync');
+      // Trigger route optimization when signal is lost for safety
+      if (allCoordinates.length > 0) {
+        optimizeRoute();
+        saveToLocalStorage();
       }
     }
 
-    // Auto-sync Functions
+    // Auto-sync Functions (Every 2 Minutes for All Coordinates)
     async function autoSyncData(reason = 'Periodic sync') {
-      if (coordinates.length === 0) return;
+      const now = Date.now();
+      if (!lastOptimizationTime) {
+        lastOptimizationTime = now;
+        return;
+      }
+      
+      // Simple 2-minute optimization trigger for all coordinates
+      const timeSinceLastOpt = now - lastOptimizationTime;
+      const shouldOptimizeByTime = timeSinceLastOpt >= 120000; // 2 minutes
+      
+      if (shouldOptimizeByTime && allCoordinates.length >= 3) {
+        console.log(`🔄 Auto-optimization triggered: ${reason}`);
+        console.log(`   - Time since last: ${(timeSinceLastOpt/1000).toFixed(1)}s`);
+        console.log(`   - Current points: ${allCoordinates.length}`);
+        
+        optimizeRoute();
+        lastOptimizationTime = now;
+      } else if (allCoordinates.length < 3) {
+        console.log(`⏸️ Optimization skipped - insufficient coordinates (${allCoordinates.length} < 3)`);
+      } else {
+        console.log(`⏸️ Optimization pending - time remaining: ${(120 - (timeSinceLastOpt/1000)).toFixed(1)}s`);
+      }
+    }
+
+    // Final sync function for when recording stops
+    async function finalSyncData(reason = 'Final sync') {
+      if (allCoordinates.length === 0) {
+        console.log('No coordinates to sync');
+        return true;
+      }
 
       autoSyncStatus.style.display = 'block';
+      autoSyncStatus.innerHTML = `
+        <div class="sync-indicator">
+          <div class="loading-spinner"></div>
+          <span>Sending ${allCoordinates.length} coordinates to server...</span>
+        </div>
+      `;
       
       try {
-        // Try primary endpoint first
-        await sendToAPI(API_ENDPOINTS.primary, coordinates, reason);
-        autoSyncCount++;
-        autoSyncCountDisplay.textContent = autoSyncCount;
-        lastSuccessfulSync = new Date();
+        // Send all coordinates in a single request
+        await sendToAPI(API_ENDPOINTS.primary, allCoordinates, reason);
         
-        // Clear coordinates after successful sync
+        console.log(`✅ Successfully sent ${allCoordinates.length} coordinates to server`);
+        
+        // Clear data after successful sync
+        allCoordinates = [];
         coordinates = [];
+        optimizationCount = 0;
+        autoSyncCount = 0;
+        autoSyncCountDisplay.textContent = 0;
+        
+        // Clear local storage
+        localStorage.removeItem('locationTracker_coordinates');
+        
         updateCoordinatesDisplay();
+        
+        autoSyncStatus.innerHTML = `
+          <div class="sync-indicator">
+            <span style="color: #28a745;">✅ All coordinates sent successfully!</span>
+          </div>
+        `;
         
         setTimeout(() => {
           autoSyncStatus.style.display = 'none';
-        }, 2000);
+        }, 3000);
+        
+        return true;
         
       } catch (error) {
-        console.error('Auto-sync failed:', error);
+        console.error('Final sync failed:', error);
+        
         // Try backup endpoints
-        await tryBackupSync(reason);
+        const success = await tryBackupSync(reason);
+        if (!success) {
+          // Keep data in local storage for safety
+          saveToLocalStorage();
+          autoSyncStatus.innerHTML = `
+            <div class="sync-indicator">
+              <span style="color: #dc3545;">⚠️ Sync failed - data saved locally for retry</span>
+            </div>
+          `;
+        }
+        return success;
       }
     }
 
@@ -394,24 +900,30 @@
       
       for (const endpoint of endpoints) {
         try {
-          await sendToAPI(endpoint, coordinates, reason + ' - backup');
-          autoSyncCount++;
-          autoSyncCountDisplay.textContent = autoSyncCount;
+          await sendToAPI(endpoint, allCoordinates, reason + ' - backup');
+          
+          // Clear data after successful backup sync
+          allCoordinates = [];
           coordinates = [];
+          optimizationCount = 0;
+          autoSyncCount = 0;
+          autoSyncCountDisplay.textContent = 0;
+          localStorage.removeItem('locationTracker_coordinates');
           updateCoordinatesDisplay();
-          autoSyncStatus.style.display = 'none';
-          return;
+          
+          autoSyncStatus.innerHTML = `
+            <div class="sync-indicator">
+              <span style="color: #28a745;">✅ Backup sync successful!</span>
+            </div>
+          `;
+          
+          return true;
         } catch (error) {
           console.error(`Backup sync failed for ${endpoint}:`, error);
         }
       }
       
-      // If all endpoints fail, keep data in memory
-      autoSyncStatus.innerHTML = `
-        <div class="sync-indicator">
-          <span style="color: #dc3545;">⚠️ Auto-sync failed - data saved locally</span>
-        </div>
-      `;
+      return false;
     }
 
     async function sendToAPI(endpoint, data, reason) {
@@ -444,20 +956,31 @@
 
     // Coordinates Display
     function updateCoordinatesDisplay() {
-      coordinateCount.textContent = coordinates.length;
+      // Show total coordinates collected
+      coordinateCount.textContent = allCoordinates.length;
       
-      if (coordinates.length === 0) {
+      if (allCoordinates.length === 0) {
         coordinatesPreview.innerHTML = 'No coordinates recorded yet...';
         return;
       }
 
-      const recent = coordinates.slice(-5).reverse();
+      // Show last 5 coordinates for preview
+      const recent = allCoordinates.slice(-5).reverse();
       coordinatesPreview.innerHTML = recent.map((coord, index) => 
         `<div class="coordinate-entry">
-          ${coordinates.length - index}: [${coord.lat.toFixed(6)}, ${coord.lng.toFixed(6)}] 
+          ${allCoordinates.length - index}: [${coord.lat.toFixed(6)}, ${coord.lng.toFixed(6)}] 
           ${coord.time.split('T')[1].split('.')[0]}
         </div>`
       ).join('');
+      
+      // Add summary info
+      if (allCoordinates.length > 5) {
+        coordinatesPreview.innerHTML += `
+          <div class="coordinate-entry" style="border-top: 1px solid #ddd; margin-top: 10px; padding-top: 10px; font-weight: bold;">
+            Total: ${allCoordinates.length} coordinates collected
+          </div>
+        `;
+      }
     }
 
     // Location Recording Functions
@@ -479,7 +1002,12 @@
           const timestamp = new Date().toISOString();
           const coord = { lat: latitude, lng: longitude, time: timestamp, accuracy };
           
-          coordinates.push(coord);
+          // Add to main coordinates array
+          allCoordinates.push(coord);
+          
+          // Keep only last 5 for preview
+          coordinates = allCoordinates.slice(-5);
+          
           updateCoordinatesDisplay();
           updateSignalStatus(accuracy, accuracy < 50);
           
@@ -488,10 +1016,14 @@
             clearTimeout(signalLostTimeout);
           }
           
-          // Auto-sync every 50 coordinates or every 5 minutes
-          if (coordinates.length % 50 === 0 || 
-              (lastSuccessfulSync && Date.now() - lastSuccessfulSync > 300000)) {
-            autoSyncData('Periodic sync - 50 coordinates or 5 minutes');
+          // Simplified optimization triggers - check every 10 coordinates for 2-minute timer
+          if (allCoordinates.length % 10 === 0) {
+            autoSyncData('Regular optimization check');
+          }
+          
+          // Save to local storage periodically for safety
+          if (allCoordinates.length % 10 === 0) {
+            saveToLocalStorage();
           }
         },
         (error) => {
@@ -539,23 +1071,56 @@
           watchId = null;
         }
         
-        // Final sync
-        if (coordinates.length > 0) {
-          try {
-            await autoSyncData('Final sync - recording stopped');
-            alert(`✅ Recording completed! ${coordinates.length} coordinates sent to server.`);
-          } catch (error) {
-            alert(`⚠️ Recording stopped but sync failed. ${coordinates.length} coordinates saved locally.`);
-          }
+        // Final optimization before sync
+        if (allCoordinates.length > 2) {
+          optimizeRoute();
         }
         
-        console.log('⏹️ Stopped recording and synced data');
+        // Final sync - send all optimized coordinates
+        if (allCoordinates.length > 0) {
+          try {
+            const success = await finalSyncData('Final sync - recording stopped');
+            if (success) {
+              alert(`✅ Recording completed! ${allCoordinates.length} optimized coordinates sent to server.`);
+            } else {
+              alert(`⚠️ Recording stopped but sync failed. ${allCoordinates.length} coordinates saved locally for retry.`);
+            }
+          } catch (error) {
+            alert(`⚠️ Recording stopped but sync failed. ${allCoordinates.length} coordinates saved locally.`);
+          }
+        } else {
+          alert('📍 Recording stopped. No coordinates were recorded.');
+        }
+        
+        // Always clear localStorage after stopping (regardless of sync success)
+        localStorage.removeItem('locationTracker_coordinates');
+        console.log('🗑️ Local storage cleared after stopping recording');
+        
+        // Reset all coordinate arrays and counters
+        allCoordinates = [];
+        coordinates = [];
+        optimizationCount = 0;
+        autoSyncCount = 0;
+        autoSyncCountDisplay.textContent = 0;
+        coordinateCount.textContent = 0;
+        
+        // Update display to show empty state
+        updateCoordinatesDisplay();
+        
+        console.log('⏹️ Stopped recording and performed final sync');
       }
     });
 
     // Initialize
+    loadFromLocalStorage(); // Load any existing coordinates
     updateCoordinatesDisplay();
-    console.log('🎯 Advanced Driver Location Recorder initialized');
+    console.log('🎯 Advanced Driver Location Recorder with Route Optimization initialized');
+    
+    // Show recovery option if coordinates exist
+    if (allCoordinates.length > 0) {
+      recordingStatus.textContent = `📱 ${allCoordinates.length} coordinates recovered`;
+      recordingStatus.style.background = 'rgba(255, 193, 7, 0.8)';
+    }
   </script>
 </body>
 </html>
