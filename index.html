@@ -170,6 +170,51 @@
       100% { opacity: 1; }
     }
     
+    .bus-id-section {
+      background: #f8f9fa;
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    
+    .bus-id-label {
+      display: block;
+      font-size: 14px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 8px;
+    }
+    
+    .bus-id-input {
+      width: 100%;
+      padding: 12px 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 500;
+      background: white;
+      color: #333;
+      transition: border-color 0.3s ease;
+    }
+    
+    .bus-id-input:focus {
+      outline: none;
+      border-color: #007bff;
+      box-shadow: 0 0 0 3px rgba(0,123,255,0.1);
+    }
+    
+    .bus-id-input::placeholder {
+      color: #999;
+      font-weight: normal;
+    }
+    
+    .bus-id-input:disabled {
+      background: #f5f5f5;
+      color: #666;
+      cursor: not-allowed;
+      border-color: #ccc;
+    }
+    
     .coordinates-preview {
       background: #f8f9fa;
       border-radius: 10px;
@@ -253,6 +298,21 @@
         </div>
       </div>
       
+      <!-- Bus ID Input -->
+      <div class="bus-id-section">
+        <label class="bus-id-label" for="busIdInput">
+          🚌 Bus ID
+        </label>
+        <input 
+          type="text" 
+          class="bus-id-input" 
+          id="busIdInput" 
+          placeholder="Enter Bus ID (e.g., BUS1234)"
+          maxlength="20"
+          required
+        />
+      </div>
+      
       <!-- Controls -->
       <div class="controls">
         <button class="btn btn-start" id="startBtn">
@@ -310,6 +370,7 @@
     // API Configuration
     const API_ENDPOINTS = {
       primary: 'https://where-is-mybus.onrender.com/api/buses/make-route',
+      // primary:'http://localhost:5001/api/buses/make-route',
       backup: 'https://your-backup-api.com/api/routes',
       emergency: 'https://emergency-backup.com/api/save'
     };
@@ -927,7 +988,11 @@
     }
 
     async function sendToAPI(endpoint, data, reason) {
+      const busIdInput = document.getElementById('busIdInput');
+      const busId = busIdInput.value.trim() || 'UNKNOWN';
+      
       const payload = {
+        busId: busId,
         routeCoordinates: data,
         timestamp: new Date().toISOString(),
         reason: reason,
@@ -1041,6 +1106,23 @@
     // Event Listeners
     startBtn.addEventListener('click', () => {
       if (!isRecording) {
+        // Validate Bus ID
+        const busIdInput = document.getElementById('busIdInput');
+        const busId = busIdInput.value.trim();
+        
+        if (!busId) {
+          alert('⚠️ Please enter a Bus ID before starting recording.');
+          busIdInput.focus();
+          return;
+        }
+        
+        // Show confirmation with database info
+        const confirmMessage = `🚌 Bus ID: ${busId}\n\n📊 Are you sure you want to start recording?\n\nThis will:\n✅ Track your GPS location continuously\n📡 Send data to the database every 2 minutes\n🗂️ Store route coordinates with optimization\n\nClick OK to start recording.`;
+        
+        if (!confirm(confirmMessage)) {
+          return;
+        }
+        
         isRecording = true;
         recordingStatus.textContent = '🔴 Recording Active';
         recordingStatus.style.background = 'rgba(220, 53, 69, 0.8)';
@@ -1048,10 +1130,13 @@
         startBtn.disabled = true;
         stopBtn.disabled = false;
         
+        // Disable Bus ID input during recording
+        busIdInput.disabled = true;
+        
         startTimer();
         recordLocation();
         
-        console.log('🚀 Started location recording...');
+        console.log(`🚀 Started location recording for Bus ID: ${busId}`);
       }
     });
 
@@ -1063,6 +1148,10 @@
         
         startBtn.disabled = false;
         stopBtn.disabled = true;
+        
+        // Re-enable Bus ID input
+        const busIdInput = document.getElementById('busIdInput');
+        busIdInput.disabled = false;
         
         stopTimer();
         
